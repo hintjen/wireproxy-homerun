@@ -55,6 +55,12 @@ type TCPServerTunnelConfig struct {
 	Target     string
 }
 
+type UDPServerTunnelConfig struct {
+	ListenPort        int
+	Target            string
+	InactivityTimeout int
+}
+
 type Socks5Config struct {
 	BindAddress string
 	Username    string
@@ -467,6 +473,32 @@ func parseResolveConfig(section *ini.Section) (*ResolveConfig, error) {
 	return config, nil
 }
 
+func parseUDPServerTunnelConfig(section *ini.Section) (RoutineSpawner, error) {
+	config := &UDPServerTunnelConfig{}
+
+	listenPort, err := parsePort(section, "ListenPort")
+	if err != nil {
+		return nil, err
+	}
+	config.ListenPort = listenPort
+
+	target, err := parseString(section, "Target")
+	if err != nil {
+		return nil, err
+	}
+	config.Target = target
+
+	if key, err := section.GetKey("InactivityTimeout"); err == nil {
+		v, err := key.Int()
+		if err != nil {
+			return nil, err
+		}
+		config.InactivityTimeout = v
+	}
+
+	return config, nil
+}
+
 func parseUDPProxyTunnelConfig(section *ini.Section) (RoutineSpawner, error) {
 	config := &UDPProxyTunnelConfig{}
 
@@ -590,6 +622,11 @@ func ParseConfig(path string) (*Configuration, error) {
 	  }
   }
     
+	err = parseRoutinesConfig(&routinesSpawners, cfg, "UDPServerTunnel", parseUDPServerTunnelConfig)
+	if err != nil {
+		return nil, err
+	}
+
 	err = parseRoutinesConfig(&routinesSpawners, cfg, "UDPProxyTunnel", parseUDPProxyTunnelConfig)
 	if err != nil {
 		return nil, err
