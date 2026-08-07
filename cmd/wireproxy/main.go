@@ -79,7 +79,7 @@ func lock(stage string) {
 		// also remove unveil permission to lock unveil
 		pledgeOrPanic("stdio rpath inet dns proc exec")
 		// Linux
-		panicIfError(landlock.V1.BestEffort().RestrictPaths(
+		panicIfError(restrictPaths(
 			landlock.RODirs("/"),
 			landlock.RWFiles("/dev/null").IgnoreIfMissing(),
 		))
@@ -93,7 +93,7 @@ func lock(stage string) {
 		pledgeOrPanic("stdio inet dns")
 		// Linux
 		net.DefaultResolver.PreferGo = true // needed to lock down dependencies
-		panicIfError(landlock.V1.BestEffort().RestrictPaths(
+		panicIfError(restrictPaths(
 			landlock.ROFiles("/etc/resolv.conf").IgnoreIfMissing(),
 			landlock.ROFiles("/dev/fd").IgnoreIfMissing(),
 			landlock.ROFiles("/dev/zero").IgnoreIfMissing(),
