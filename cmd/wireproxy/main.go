@@ -151,7 +151,7 @@ func lockNetwork(sections []wireproxy.RoutineSpawner, infoAddr *string) {
 		}
 	}
 
-	panicIfError(landlock.V4.BestEffort().RestrictNet(rules...))
+	panicIfError(restrictNet(rules...))
 }
 
 func main() {

@@ -26,3 +26,10 @@ import "github.com/landlock-lsm/go-landlock/landlock"
 func restrictPaths(_ ...landlock.Rule) error {
 	return nil
 }
+
+// restrictNet is a no-op for the same reason as restrictPaths: every entry
+// point into Landlock probes the ABI version first, so the network sandbox
+// dies on exactly the same blocked syscall as the filesystem one.
+func restrictNet(_ ...landlock.Rule) error {
+	return nil
+}

@@ -10,3 +10,8 @@ import "github.com/landlock-lsm/go-landlock/landlock"
 func restrictPaths(rules ...landlock.Rule) error {
 	return landlock.V1.BestEffort().RestrictPaths(rules...)
 }
+
+// restrictNet applies wireproxy's Landlock network sandbox.
+func restrictNet(rules ...landlock.Rule) error {
+	return landlock.V4.BestEffort().RestrictNet(rules...)
+}
