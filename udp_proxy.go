@@ -36,6 +36,7 @@ func (conf *UDPProxyTunnelConfig) Bind(_ *VirtualTun) error {
 
 // Close stops the read loop and the session reaper.
 func (conf *UDPProxyTunnelConfig) Close() error {
+	conf.markClosed()
 	if conf.done != nil {
 		select {
 		case <-conf.done:
@@ -137,7 +138,7 @@ func (conf *UDPProxyTunnelConfig) Serve(vt *VirtualTun) error {
 	for {
 		n, src, err := listener.ReadFromUDP(buf)
 		if err != nil {
-			if closedByUs(err) {
+			if conf.closedByUs(err) {
 				return nil
 			}
 			log.Printf("UDPProxyTunnel: error reading from UDP: %v", err)

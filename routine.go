@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/icmp"
@@ -84,14 +85,36 @@ type RoutineSpawner interface {
 	Close() error
 }
 
-// closedByUs reports whether an error is the ordinary consequence of Close
-// rather than a fault.
+// shutdown records that Close was asked for, so Serve can tell a deliberate
+// stop from a fault.
 //
-// Every accept and read loop needs this: closing a listener is how shutdown
-// works, so the resulting error is expected. Treating it as failure is what
-// made stopping a tunnel fatal.
-func closedByUs(err error) bool {
-	return err == nil || errors.Is(err, net.ErrClosed)
+// # Why intent and not the error
+//
+// Closing a listener is how shutdown works, so the resulting error is expected
+// — but *which* error depends on who owns the listener. A host socket reports
+// net.ErrClosed; a listener on the WireGuard interface belongs to gVisor's
+// netstack and reports "endpoint is in invalid state", which is not
+// net.ErrClosed and never will be. Matching on error values means tracking two
+// unrelated error domains and getting it wrong the first time a third appears.
+//
+// That is not hypothetical: the netstack case is the one Homerun actually
+// uses, and judging it by error value alone let a clean stop look like a
+// failure — which in the CLI is log.Fatal, i.e. the exact process death this
+// rework exists to remove.
+//
+// Recording the intent is both simpler and correct: if we asked it to stop,
+// whatever it says on the way out is not a fault.
+type shutdown struct{ closed atomic.Bool }
+
+func (s *shutdown) markClosed()    { s.closed.Store(true) }
+func (s *shutdown) stopping() bool { return s.closed.Load() }
+
+// closedByUs reports whether an error is the ordinary consequence of Close.
+//
+// The intent check is the reliable half; the error check catches a listener
+// closed by something other than our own Close.
+func (s *shutdown) closedByUs(err error) bool {
+	return err == nil || s.stopping() || errors.Is(err, net.ErrClosed)
 }
 
 type addressPort struct {
@@ -222,13 +245,16 @@ func (config *Socks5Config) Serve(vt *VirtualTun) error {
 		socks5.WithBufferPool(bufferpool.NewPool(256 * 1024)),
 	}
 
-	if err := socks5.NewServer(options...).Serve(config.listener); err != nil && !closedByUs(err) {
+	if err := socks5.NewServer(options...).Serve(config.listener); err != nil && !config.closedByUs(err) {
 		return fmt.Errorf("socks5: %w", err)
 	}
 	return nil
 }
 
-func (config *Socks5Config) Close() error { return closeListener(config.listener) }
+func (config *Socks5Config) Close() error {
+	config.markClosed()
+	return closeListener(config.listener)
+}
 
 // Bind acquires the HTTP proxy listener.
 //
@@ -273,13 +299,16 @@ func (config *HTTPConfig) Serve(vt *VirtualTun) error {
 		server.authRequired = true
 	}
 	// The listener is already wrapped by Bind if TLS was configured.
-	if err := server.Serve(config.listener); err != nil && !closedByUs(err) {
+	if err := server.Serve(config.listener); err != nil && !config.closedByUs(err) {
 		return fmt.Errorf("http proxy: %w", err)
 	}
 	return nil
 }
 
-func (config *HTTPConfig) Close() error { return closeListener(config.listener) }
+func (config *HTTPConfig) Close() error {
+	config.markClosed()
+	return closeListener(config.listener)
+}
 
 // Valid checks the authentication data in CredentialValidator and compare them
 // to username and password in constant time.
@@ -364,7 +393,7 @@ func (conf *TCPClientTunnelConfig) Serve(vt *VirtualTun) error {
 	for {
 		conn, err := conf.listener.Accept()
 		if err != nil {
-			if closedByUs(err) {
+			if conf.closedByUs(err) {
 				return nil
 			}
 			return fmt.Errorf("tcp client tunnel: %w", err)
@@ -373,7 +402,10 @@ func (conf *TCPClientTunnelConfig) Serve(vt *VirtualTun) error {
 	}
 }
 
-func (conf *TCPClientTunnelConfig) Close() error { return closeListener(conf.listener) }
+func (conf *TCPClientTunnelConfig) Close() error {
+	conf.markClosed()
+	return closeListener(conf.listener)
+}
 
 // Bind resolves the target. There is no listener: this tunnel dials out.
 func (conf *STDIOTunnelConfig) Bind(_ *VirtualTun) error {
@@ -449,7 +481,7 @@ func (conf *TCPServerTunnelConfig) Serve(vt *VirtualTun) error {
 	for {
 		conn, err := conf.listener.Accept()
 		if err != nil {
-			if closedByUs(err) {
+			if conf.closedByUs(err) {
 				return nil
 			}
 			return fmt.Errorf("tcp server tunnel: %w", err)
@@ -458,14 +490,20 @@ func (conf *TCPServerTunnelConfig) Serve(vt *VirtualTun) error {
 	}
 }
 
-func (conf *TCPServerTunnelConfig) Close() error { return closeListener(conf.listener) }
+func (conf *TCPServerTunnelConfig) Close() error {
+	conf.markClosed()
+	return closeListener(conf.listener)
+}
 
 // closeListener closes c if it exists, tolerating a second close.
+//
+// A listener already closed reports it differently depending on who owns it,
+// and none of those are failures worth surfacing from Close.
 func closeListener(c io.Closer) error {
 	if c == nil {
 		return nil
 	}
-	if err := c.Close(); err != nil && !closedByUs(err) {
+	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		return err
 	}
 	return nil

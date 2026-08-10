@@ -35,6 +35,7 @@ func (conf *UDPServerTunnelConfig) Bind(vt *VirtualTun) error {
 
 // Close stops the read loop and the session reaper.
 func (conf *UDPServerTunnelConfig) Close() error {
+	conf.markClosed()
 	if conf.done != nil {
 		select {
 		case <-conf.done:
@@ -106,7 +107,7 @@ func (conf *UDPServerTunnelConfig) Serve(_ *VirtualTun) error {
 	for {
 		n, src, err := listener.ReadFrom(buf)
 		if err != nil {
-			if closedByUs(err) {
+			if conf.closedByUs(err) {
 				return nil
 			}
 			errorLogger.Printf("UDPServerTunnel: read from WireGuard error: %v", err)

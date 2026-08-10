@@ -40,6 +40,7 @@ type UDPProxyTunnelConfig struct {
 
 	listener *net.UDPConn
 	done     chan struct{}
+	shutdown
 }
 
 type TCPClientTunnelConfig struct {
@@ -49,6 +50,7 @@ type TCPClientTunnelConfig struct {
 	// Held from Bind until Close. See RoutineSpawner.
 	listener net.Listener
 	raddr    *addressPort
+	shutdown
 }
 
 type STDIOTunnelConfig struct {
@@ -65,6 +67,7 @@ type TCPServerTunnelConfig struct {
 
 	listener net.Listener
 	raddr    *addressPort
+	shutdown
 }
 
 type UDPServerTunnelConfig struct {
@@ -75,6 +78,7 @@ type UDPServerTunnelConfig struct {
 	listener   net.PacketConn
 	targetAddr *net.UDPAddr
 	done       chan struct{}
+	shutdown
 }
 
 type Socks5Config struct {
@@ -83,6 +87,7 @@ type Socks5Config struct {
 	Password    string
 
 	listener net.Listener
+	shutdown
 }
 
 type HTTPConfig struct {
@@ -93,6 +98,7 @@ type HTTPConfig struct {
 	KeyFile     string
 
 	listener net.Listener
+	shutdown
 }
 
 type ResolveConfig struct {

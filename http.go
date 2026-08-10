@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -181,7 +182,10 @@ func (s *HTTPServer) Serve(listener net.Listener) error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			if closedByUs(err) {
+			// This one has no shutdown intent to consult — the caller owns
+			// the listener. HTTPConfig.Serve wraps it and applies the
+			// intent-aware check to what comes back.
+			if errors.Is(err, net.ErrClosed) {
 				return nil
 			}
 			return fmt.Errorf("accept request failed: %w", err)
