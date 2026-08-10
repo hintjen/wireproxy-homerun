@@ -1,6 +1,8 @@
 package wireproxy
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"net"
 	"sync"
@@ -13,20 +15,46 @@ type udpServerSession struct {
 	closeChan  chan struct{}
 }
 
-// SpawnRoutine listens for UDP packets on the WireGuard interface and forwards
-// each unique source address to the local Target via its own UDP connection.
-// Flow: <WireGuard peer> --(wireguard)--> ListenPort --> Target (local)
-func (conf *UDPServerTunnelConfig) SpawnRoutine(vt *VirtualTun) {
+// Bind resolves the local target and acquires the WireGuard-side listener.
+func (conf *UDPServerTunnelConfig) Bind(vt *VirtualTun) error {
 	targetAddr, err := net.ResolveUDPAddr("udp", conf.Target)
 	if err != nil {
-		log.Fatalf("UDPServerTunnel: cannot resolve target %s: %v", conf.Target, err)
+		return fmt.Errorf("udp server tunnel: cannot resolve target %s: %w", conf.Target, err)
 	}
+	conf.targetAddr = targetAddr
 
-	listenAddr := &net.UDPAddr{Port: conf.ListenPort}
-	listener, err := vt.Tnet.ListenUDP(listenAddr)
+	listener, err := vt.Tnet.ListenUDP(&net.UDPAddr{Port: conf.ListenPort})
 	if err != nil {
-		log.Fatalf("UDPServerTunnel: cannot listen on WireGuard port %d: %v", conf.ListenPort, err)
+		return fmt.Errorf(
+			"udp server tunnel: cannot listen on WireGuard port %d: %w", conf.ListenPort, err)
 	}
+	conf.listener = listener
+	conf.done = make(chan struct{})
+	return nil
+}
+
+// Close stops the read loop and the session reaper.
+func (conf *UDPServerTunnelConfig) Close() error {
+	if conf.done != nil {
+		select {
+		case <-conf.done:
+		default:
+			close(conf.done)
+		}
+	}
+	return closeListener(conf.listener)
+}
+
+// Serve forwards each unique source address to the local target over its own
+// UDP connection.
+// Flow: <WireGuard peer> --(wireguard)--> ListenPort --> Target (local)
+func (conf *UDPServerTunnelConfig) Serve(_ *VirtualTun) error {
+	if conf.listener == nil {
+		return errors.New("udp server tunnel: Serve called before Bind")
+	}
+	targetAddr := conf.targetAddr
+	listener := conf.listener
+
 	log.Printf("UDPServerTunnel listening on WireGuard port %d, forwarding to %s", conf.ListenPort, conf.Target)
 
 	inactivityDur := time.Duration(conf.InactivityTimeout) * time.Second
@@ -50,7 +78,12 @@ func (conf *UDPServerTunnelConfig) SpawnRoutine(vt *VirtualTun) {
 		go func() {
 			ticker := time.NewTicker(10 * time.Second)
 			defer ticker.Stop()
-			for range ticker.C {
+			for {
+				select {
+				case <-conf.done:
+					return
+				case <-ticker.C:
+				}
 				now := time.Now()
 				mu.Lock()
 				for key, sess := range sessions {
@@ -73,6 +106,9 @@ func (conf *UDPServerTunnelConfig) SpawnRoutine(vt *VirtualTun) {
 	for {
 		n, src, err := listener.ReadFrom(buf)
 		if err != nil {
+			if closedByUs(err) {
+				return nil
+			}
 			errorLogger.Printf("UDPServerTunnel: read from WireGuard error: %v", err)
 			continue
 		}

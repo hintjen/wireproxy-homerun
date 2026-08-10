@@ -5,9 +5,11 @@ import (
 	"context"
 	srand "crypto/rand"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"math/rand"
@@ -54,9 +56,42 @@ type VirtualTun struct {
 	PingRecordLock *sync.Mutex
 }
 
-// RoutineSpawner spawns a routine (e.g. socks5, tcp static routes) after the configuration is parsed
+// RoutineSpawner runs one tunnel (socks5, a static TCP route, a UDP forward)
+// once the configuration is parsed.
+//
+// # Why this is three methods and not one
+//
+// It used to be a single blocking SpawnRoutine that called log.Fatal — that is,
+// os.Exit — on every failure, including the perfectly ordinary one of a
+// listener being closed on shutdown. That is survivable in a CLI whose only job
+// is to run until killed. It is not survivable when this package is linked into
+// an application: os.Exit takes the whole process, no defer runs, and nothing
+// can recover. Stopping a tunnel would terminate the host app.
+//
+// Splitting Bind from Serve also makes the common failure — the port is already
+// in use — an error the caller receives from Bind, rather than a log line that
+// appears after it has already been told the tunnel started.
 type RoutineSpawner interface {
-	SpawnRoutine(vt *VirtualTun)
+	// Bind acquires whatever this routine listens on. Safe to call once.
+	Bind(vt *VirtualTun) error
+
+	// Serve runs until Close, returning nil for a deliberate shutdown and an
+	// error for anything else. Bind must have succeeded first.
+	Serve(vt *VirtualTun) error
+
+	// Close releases the listener, causing Serve to return nil. Idempotent,
+	// and safe to call from another goroutine.
+	Close() error
+}
+
+// closedByUs reports whether an error is the ordinary consequence of Close
+// rather than a fault.
+//
+// Every accept and read loop needs this: closing a listener is how shutdown
+// works, so the resulting error is expected. Treating it as failure is what
+// made stopping a tunnel fatal.
+func closedByUs(err error) bool {
+	return err == nil || errors.Is(err, net.ErrClosed)
 }
 
 type addressPort struct {
@@ -155,8 +190,22 @@ func (d VirtualTun) resolveToAddrPort(endpoint *addressPort) (*netip.AddrPort, e
 	return &addrPort, nil
 }
 
-// SpawnRoutine spawns a socks5 server.
-func (config *Socks5Config) SpawnRoutine(vt *VirtualTun) {
+// Bind acquires the socks5 listener.
+func (config *Socks5Config) Bind(_ *VirtualTun) error {
+	listener, err := net.Listen("tcp", config.BindAddress)
+	if err != nil {
+		return fmt.Errorf("socks5: cannot listen on %s: %w", config.BindAddress, err)
+	}
+	config.listener = listener
+	return nil
+}
+
+// Serve runs the socks5 server until Close.
+func (config *Socks5Config) Serve(vt *VirtualTun) error {
+	if config.listener == nil {
+		return errors.New("socks5: Serve called before Bind")
+	}
+
 	var authMethods []socks5.Authenticator
 	if username := config.Username; username != "" {
 		authMethods = append(authMethods, socks5.UserPassAuthenticator{
@@ -173,15 +222,48 @@ func (config *Socks5Config) SpawnRoutine(vt *VirtualTun) {
 		socks5.WithBufferPool(bufferpool.NewPool(256 * 1024)),
 	}
 
-	server := socks5.NewServer(options...)
-
-	if err := server.ListenAndServe("tcp", config.BindAddress); err != nil {
-		log.Fatal(err)
+	if err := socks5.NewServer(options...).Serve(config.listener); err != nil && !closedByUs(err) {
+		return fmt.Errorf("socks5: %w", err)
 	}
+	return nil
 }
 
-// SpawnRoutine spawns a http server.
-func (config *HTTPConfig) SpawnRoutine(vt *VirtualTun) {
+func (config *Socks5Config) Close() error { return closeListener(config.listener) }
+
+// Bind acquires the HTTP proxy listener.
+//
+// TLS is applied here rather than in Serve because it is a property of the
+// listener: HTTPServer.listen wrapped it at bind time, and binding plainly
+// would quietly downgrade a configured HTTPS proxy to cleartext.
+func (config *HTTPConfig) Bind(_ *VirtualTun) error {
+	var (
+		listener net.Listener
+		err      error
+	)
+	if config.CertFile != "" && config.KeyFile != "" {
+		var cert tls.Certificate
+		cert, err = tls.LoadX509KeyPair(config.CertFile, config.KeyFile)
+		if err != nil {
+			return fmt.Errorf("http proxy: cannot load certificate: %w", err)
+		}
+		listener, err = tls.Listen("tcp", config.BindAddress,
+			&tls.Config{Certificates: []tls.Certificate{cert}})
+	} else {
+		listener, err = net.Listen("tcp", config.BindAddress)
+	}
+	if err != nil {
+		return fmt.Errorf("http proxy: cannot listen on %s: %w", config.BindAddress, err)
+	}
+	config.listener = listener
+	return nil
+}
+
+// Serve runs the HTTP proxy until Close.
+func (config *HTTPConfig) Serve(vt *VirtualTun) error {
+	if config.listener == nil {
+		return errors.New("http proxy: Serve called before Bind")
+	}
+
 	server := &HTTPServer{
 		config: config,
 		dial:   vt.Tnet.Dial,
@@ -190,15 +272,14 @@ func (config *HTTPConfig) SpawnRoutine(vt *VirtualTun) {
 	if config.Username != "" || config.Password != "" {
 		server.authRequired = true
 	}
-
-	if config.CertFile != "" && config.KeyFile != "" {
-		server.tlsRequired = true
+	// The listener is already wrapped by Bind if TLS was configured.
+	if err := server.Serve(config.listener); err != nil && !closedByUs(err) {
+		return fmt.Errorf("http proxy: %w", err)
 	}
-
-	if err := server.ListenAndServe("tcp", config.BindAddress); err != nil {
-		log.Fatal(err)
-	}
+	return nil
 }
+
+func (config *HTTPConfig) Close() error { return closeListener(config.listener) }
 
 // Valid checks the authentication data in CredentialValidator and compare them
 // to username and password in constant time.
@@ -258,36 +339,64 @@ func STDIOTcpForward(vt *VirtualTun, raddr *addressPort, input *os.File, output 
 	go connForward(sconn, output)
 }
 
-// SpawnRoutine spawns a local TCP server which acts as a proxy to the specified target
-func (conf *TCPClientTunnelConfig) SpawnRoutine(vt *VirtualTun) {
+// Bind acquires the local listener this tunnel proxies from.
+func (conf *TCPClientTunnelConfig) Bind(_ *VirtualTun) error {
 	raddr, err := parseAddressPort(conf.Target)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("tcp client tunnel: bad target %q: %w", conf.Target, err)
 	}
+	conf.raddr = raddr
 
-	server, err := net.ListenTCP("tcp", conf.BindAddress)
+	listener, err := net.ListenTCP("tcp", conf.BindAddress)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("tcp client tunnel: cannot listen on %s: %w", conf.BindAddress, err)
+	}
+	conf.listener = listener
+	return nil
+}
+
+// Serve accepts local connections and forwards each over WireGuard.
+func (conf *TCPClientTunnelConfig) Serve(vt *VirtualTun) error {
+	if conf.listener == nil {
+		return errors.New("tcp client tunnel: Serve called before Bind")
 	}
 
 	for {
-		conn, err := server.Accept()
+		conn, err := conf.listener.Accept()
 		if err != nil {
-			log.Fatal(err)
+			if closedByUs(err) {
+				return nil
+			}
+			return fmt.Errorf("tcp client tunnel: %w", err)
 		}
-		go tcpClientForward(vt, raddr, conn)
+		go tcpClientForward(vt, conf.raddr, conn)
 	}
 }
 
-// SpawnRoutine connects to the specified target and plumbs it to STDIN / STDOUT
-func (conf *STDIOTunnelConfig) SpawnRoutine(vt *VirtualTun) {
+func (conf *TCPClientTunnelConfig) Close() error { return closeListener(conf.listener) }
+
+// Bind resolves the target. There is no listener: this tunnel dials out.
+func (conf *STDIOTunnelConfig) Bind(_ *VirtualTun) error {
 	raddr, err := parseAddressPort(conf.Target)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("stdio tunnel: bad target %q: %w", conf.Target, err)
 	}
-
-	go STDIOTcpForward(vt, raddr, conf.Input, conf.Output)
+	conf.raddr = raddr
+	return nil
 }
+
+// Serve plumbs the target to STDIN/STDOUT and returns immediately. The
+// forwarding runs until those streams close, which is the process ending.
+func (conf *STDIOTunnelConfig) Serve(vt *VirtualTun) error {
+	if conf.raddr == nil {
+		return errors.New("stdio tunnel: Serve called before Bind")
+	}
+	go STDIOTcpForward(vt, conf.raddr, conf.Input, conf.Output)
+	return nil
+}
+
+// Close does nothing: STDIN and STDOUT belong to the caller.
+func (conf *STDIOTunnelConfig) Close() error { return nil }
 
 // tcpServerForward starts a new connection locally and forward traffic from `conn`
 func tcpServerForward(vt *VirtualTun, raddr *addressPort, conn net.Conn) {
@@ -310,26 +419,56 @@ func tcpServerForward(vt *VirtualTun, raddr *addressPort, conn net.Conn) {
 
 }
 
-// SpawnRoutine spawns a TCP server on wireguard which acts as a proxy to the specified target
-func (conf *TCPServerTunnelConfig) SpawnRoutine(vt *VirtualTun) {
+// Bind acquires the WireGuard-side listener.
+//
+// This is the routine Homerun depends on, and its accept loop is where the old
+// log.Fatal did the most damage: closing the listener to stop a tunnel produced
+// an error here, and the process exited.
+func (conf *TCPServerTunnelConfig) Bind(vt *VirtualTun) error {
 	raddr, err := parseAddressPort(conf.Target)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("tcp server tunnel: bad target %q: %w", conf.Target, err)
 	}
+	conf.raddr = raddr
 
-	addr := &net.TCPAddr{Port: conf.ListenPort}
-	server, err := vt.Tnet.ListenTCP(addr)
+	listener, err := vt.Tnet.ListenTCP(&net.TCPAddr{Port: conf.ListenPort})
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf(
+			"tcp server tunnel: cannot listen on WireGuard port %d: %w", conf.ListenPort, err)
+	}
+	conf.listener = listener
+	return nil
+}
+
+// Serve accepts from the WireGuard interface and forwards to the local target.
+func (conf *TCPServerTunnelConfig) Serve(vt *VirtualTun) error {
+	if conf.listener == nil {
+		return errors.New("tcp server tunnel: Serve called before Bind")
 	}
 
 	for {
-		conn, err := server.Accept()
+		conn, err := conf.listener.Accept()
 		if err != nil {
-			log.Fatal(err)
+			if closedByUs(err) {
+				return nil
+			}
+			return fmt.Errorf("tcp server tunnel: %w", err)
 		}
-		go tcpServerForward(vt, raddr, conn)
+		go tcpServerForward(vt, conf.raddr, conn)
 	}
+}
+
+func (conf *TCPServerTunnelConfig) Close() error { return closeListener(conf.listener) }
+
+// closeListener closes c if it exists, tolerating a second close.
+func closeListener(c io.Closer) error {
+	if c == nil {
+		return nil
+	}
+	if err := c.Close(); err != nil && !closedByUs(err) {
+		return err
+	}
+	return nil
 }
 
 func (d VirtualTun) ServeHTTP(w http.ResponseWriter, r *http.Request) {

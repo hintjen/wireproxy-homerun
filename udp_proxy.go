@@ -1,6 +1,7 @@
 package wireproxy
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -17,19 +18,42 @@ type udpSession struct {
 	inactivityDur time.Duration
 }
 
-// SpawnRoutine implements the RoutineSpawner interface.
-// It starts listening on config.BindAddress, handling each unique source (client) address
-// with its own udpSession. If InactivityTimeout > 0, sessions automatically close after inactivity
-func (conf *UDPProxyTunnelConfig) SpawnRoutine(vt *VirtualTun) {
+// Bind acquires the local UDP listener.
+func (conf *UDPProxyTunnelConfig) Bind(_ *VirtualTun) error {
 	addr, err := net.ResolveUDPAddr("udp", conf.BindAddress)
 	if err != nil {
-		log.Fatalf("UDPProxyTunnelConfig: could not resolve bind address %s: %v", conf.BindAddress, err)
+		return fmt.Errorf("udp proxy: could not resolve bind address %s: %w", conf.BindAddress, err)
 	}
 
 	listener, err := net.ListenUDP("udp", addr)
 	if err != nil {
-		log.Fatalf("UDPProxyTunnelConfig: could not listen on %s: %v", conf.BindAddress, err)
+		return fmt.Errorf("udp proxy: could not listen on %s: %w", conf.BindAddress, err)
 	}
+	conf.listener = listener
+	conf.done = make(chan struct{})
+	return nil
+}
+
+// Close stops the read loop and the session reaper.
+func (conf *UDPProxyTunnelConfig) Close() error {
+	if conf.done != nil {
+		select {
+		case <-conf.done:
+		default:
+			close(conf.done)
+		}
+	}
+	return closeListener(conf.listener)
+}
+
+// Serve handles each unique source (client) address with its own udpSession.
+// If InactivityTimeout > 0, sessions automatically close after inactivity.
+func (conf *UDPProxyTunnelConfig) Serve(vt *VirtualTun) error {
+	if conf.listener == nil {
+		return errors.New("udp proxy: Serve called before Bind")
+	}
+	listener := conf.listener
+
 	log.Printf("UDPProxyTunnel listening on %s, forwarding to %s", conf.BindAddress, conf.Target)
 
 	inactivityDur := time.Duration(conf.InactivityTimeout) * time.Second
@@ -58,7 +82,12 @@ func (conf *UDPProxyTunnelConfig) SpawnRoutine(vt *VirtualTun) {
 		go func() {
 			ticker := time.NewTicker(10 * time.Second)
 			defer ticker.Stop()
-			for range ticker.C {
+			for {
+				select {
+				case <-conf.done:
+					return
+				case <-ticker.C:
+				}
 				now := time.Now()
 				sessionMu.Lock()
 				for key, sess := range sessions {
@@ -103,30 +132,31 @@ func (conf *UDPProxyTunnelConfig) SpawnRoutine(vt *VirtualTun) {
 		return s, nil
 	}
 
-	// Main loop to read from local client and forward to remote
-	go func() {
-		buf := make([]byte, 64*1024) // typical max UDP size
-		for {
-			n, src, err := listener.ReadFromUDP(buf)
-			if err != nil {
-				log.Printf("UDPProxyTunnel: error reading from UDP: %v", err)
-				continue
+	// Main loop to read from local client and forward to remote.
+	buf := make([]byte, 64*1024) // typical max UDP size
+	for {
+		n, src, err := listener.ReadFromUDP(buf)
+		if err != nil {
+			if closedByUs(err) {
+				return nil
 			}
-
-			srcKey := src.String() // identify session by the local client's IP:port
-			s, err := getOrCreateSession(srcKey)
-			if err != nil {
-				errorLogger.Printf("UDPProxyTunnel: getOrCreateSession failed for %s: %v", srcKey, err)
-				continue
-			}
-
-			s.lastActive = time.Now()
-			_, err = s.remoteConn.Write(buf[:n])
-			if err != nil {
-				errorLogger.Printf("UDPProxyTunnel: could not write to remote (%s): %v", conf.Target, err)
-			}
+			log.Printf("UDPProxyTunnel: error reading from UDP: %v", err)
+			continue
 		}
-	}()
+
+		srcKey := src.String() // identify session by the local client's IP:port
+		s, err := getOrCreateSession(srcKey)
+		if err != nil {
+			errorLogger.Printf("UDPProxyTunnel: getOrCreateSession failed for %s: %v", srcKey, err)
+			continue
+		}
+
+		s.lastActive = time.Now()
+		_, err = s.remoteConn.Write(buf[:n])
+		if err != nil {
+			errorLogger.Printf("UDPProxyTunnel: could not write to remote (%s): %v", conf.Target, err)
+		}
+	}
 }
 
 // handles data from the remote WireGuard side back to the local client

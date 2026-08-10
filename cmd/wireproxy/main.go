@@ -251,8 +251,23 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Bind everything before serving anything, so a port conflict is reported
+	// once, up front, instead of arriving as a log line after the CLI has
+	// already claimed to be running.
 	for _, spawner := range conf.Routines {
-		go spawner.SpawnRoutine(tun)
+		if err := spawner.Bind(tun); err != nil {
+			log.Fatal(err)
+		}
+	}
+	for _, spawner := range conf.Routines {
+		go func(spawner wireproxy.RoutineSpawner) {
+			if err := spawner.Serve(tun); err != nil {
+				// A routine failing is fatal to this process, which is what the
+				// CLI has always done. The difference is that a *deliberate*
+				// shutdown now returns nil and no longer lands here.
+				log.Fatal(err)
+			}
+		}(spawner)
 	}
 
 	tun.StartPingIPs()

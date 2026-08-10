@@ -82,8 +82,36 @@ func bindForConfig(conf *DeviceConfig) conn.Bind {
 	return bind
 }
 
-// StartWireguard creates a tun interface on netstack given a configuration
+// StartWireguard creates a tun interface on netstack given a configuration.
+//
+// Output goes to stdout/stderr at the given level. A caller that needs the log
+// lines themselves — to react to them rather than print them — should use
+// StartWireguardWithLogger.
 func StartWireguard(conf *Configuration, logLevel int) (*VirtualTun, error) {
+	return StartWireguardWithLogger(conf, device.NewLogger(logLevel, ""))
+}
+
+// StartWireguardWithLogger is StartWireguard with the device's log output
+// delivered to the caller instead of written out.
+//
+// # Why this exists
+//
+// device.Logger is two function fields, and wireguard-go reports everything
+// worth reacting to through them — most importantly:
+//
+//	"%s - Handshake did not complete after %d seconds, retrying (try %d)"
+//
+// A tunnel whose credentials have been revoked retries for ever and looks
+// exactly like a slow network until you count those lines. A library consumer
+// embedding this package has no way to see them otherwise: they go to the
+// process's stderr, which in an application is nobody's.
+//
+// Passing nil silences the device, the same as LogLevelSilent.
+func StartWireguardWithLogger(conf *Configuration, logger *device.Logger) (*VirtualTun, error) {
+	if logger == nil {
+		logger = device.NewLogger(device.LogLevelSilent, "")
+	}
+
 	deviceConf := conf.Device
 	setting, err := CreateIPCRequest(deviceConf)
 	if err != nil {
@@ -95,7 +123,7 @@ func StartWireguard(conf *Configuration, logLevel int) (*VirtualTun, error) {
 		return nil, err
 	}
 	bind := bindForConfig(deviceConf)
-	dev := device.NewDevice(tun, bind, device.NewLogger(logLevel, ""))
+	dev := device.NewDevice(tun, bind, logger)
 	err = dev.IpcSet(setting.IpcRequest)
 	if err != nil {
 		return nil, err

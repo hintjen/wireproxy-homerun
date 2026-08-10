@@ -162,16 +162,28 @@ func (s *HTTPServer) listen(network, addr string) (net.Listener, error) {
 
 // ListenAndServe is used to create a listener and serve on it
 func (s *HTTPServer) ListenAndServe(network, addr string) error {
-	server, err := s.listen(network, addr)
+	listener, err := s.listen(network, addr)
 	if err != nil {
 		return fmt.Errorf("listen tcp failed: %w", err)
 	}
-	defer func(server net.Listener) {
-		_ = server.Close()
-	}(server)
+	defer func(listener net.Listener) {
+		_ = listener.Close()
+	}(listener)
+	return s.Serve(listener)
+}
+
+// Serve accepts on an already-bound listener until it is closed.
+//
+// Split out of ListenAndServe so a caller can bind first and discover a port
+// conflict as an error, then serve separately. Closing the listener is how
+// shutdown works, so that case returns nil rather than an error.
+func (s *HTTPServer) Serve(listener net.Listener) error {
 	for {
-		conn, err := server.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
+			if closedByUs(err) {
+				return nil
+			}
 			return fmt.Errorf("accept request failed: %w", err)
 		}
 		go func(conn net.Conn) {

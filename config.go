@@ -37,34 +37,52 @@ type UDPProxyTunnelConfig struct {
 	BindAddress       string
 	Target            string
 	InactivityTimeout int
+
+	listener *net.UDPConn
+	done     chan struct{}
 }
 
 type TCPClientTunnelConfig struct {
 	BindAddress *net.TCPAddr
 	Target      string
+
+	// Held from Bind until Close. See RoutineSpawner.
+	listener net.Listener
+	raddr    *addressPort
 }
 
 type STDIOTunnelConfig struct {
 	Target string
 	Input  *os.File
 	Output *os.File
+
+	raddr *addressPort
 }
 
 type TCPServerTunnelConfig struct {
 	ListenPort int
 	Target     string
+
+	listener net.Listener
+	raddr    *addressPort
 }
 
 type UDPServerTunnelConfig struct {
 	ListenPort        int
 	Target            string
 	InactivityTimeout int
+
+	listener   net.PacketConn
+	targetAddr *net.UDPAddr
+	done       chan struct{}
 }
 
 type Socks5Config struct {
 	BindAddress string
 	Username    string
 	Password    string
+
+	listener net.Listener
 }
 
 type HTTPConfig struct {
@@ -73,6 +91,8 @@ type HTTPConfig struct {
 	Password    string
 	CertFile    string
 	KeyFile     string
+
+	listener net.Listener
 }
 
 type ResolveConfig struct {
@@ -549,13 +569,35 @@ func parseRoutinesConfig(routines *[]RoutineSpawner, cfg *ini.File, sectionName 
 
 // ParseConfig takes the path of a configuration file and parses it into Configuration
 func ParseConfig(path string) (*Configuration, error) {
+	return parseConfigSource(path)
+}
+
+// ParseConfigString parses a configuration held in memory.
+//
+// # Why this exists
+//
+// An [Interface] section contains a WireGuard private key. A consumer that has
+// the config as a string — rendered, fetched, or decrypted — should not have to
+// write it to a file just to hand it back, because that file is a secret at
+// rest that something must then remember to delete. Reading a path is a
+// convenience the CLI needs; it should not be the only way in.
+func ParseConfigString(text string) (*Configuration, error) {
+	if strings.TrimSpace(text) == "" {
+		return nil, errors.New("configuration is empty")
+	}
+	// go-ini's LoadSources takes []byte as raw content rather than a filename.
+	return parseConfigSource([]byte(text))
+}
+
+// parseConfigSource parses anything go-ini accepts: a path, or raw bytes.
+func parseConfigSource(source any) (*Configuration, error) {
 	iniOpt := ini.LoadOptions{
 		Insensitive:            true,
 		AllowShadows:           true,
 		AllowNonUniqueSections: true,
 	}
 
-	cfg, err := ini.LoadSources(iniOpt, path)
+	cfg, err := ini.LoadSources(iniOpt, source)
 	if err != nil {
 		return nil, err
 	}
