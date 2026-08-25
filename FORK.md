@@ -48,6 +48,21 @@ reviewable against that sentence.
 The `RoutineSpawner`, logger and `ParseConfigString` changes are the kind
 that could go upstream. `UDPServerTunnel` and the Android build are ours.
 
+### What this repository no longer carries
+
+Before it was a fork of upstream, this repository was a flat import of
+wireproxy *and* wireguard-go (history preserved on `legacy/monorepo`), and
+patched wireguard-go's netstack `Close` to call `stack.Close()` and
+`stack.Wait()`: `RemoveNIC` alone left one TCP dispatcher goroutine per core
+behind on every tunnel stop, which on a phone that starts and stops a server
+all day accumulates against the memory limit. wireguard-go has since taken
+the `Close()` half itself (`tun/netstack/tun.go`, 2025), and the stack is
+not reachable from outside the package for the `Wait()`. Measured with the
+consumer's repeated start/stop test against the upstream module, with and
+without a pause between stop and the next start: goroutines hold at
+baseline across five cycles. So wireguard-go comes from the module proxy,
+unpatched.
+
 ## Building
 
 ```bash
