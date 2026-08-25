@@ -8,6 +8,7 @@ import (
 	"net/netip"
 
 	"github.com/MakeNowJust/heredoc/v2"
+	"github.com/windtf/wireproxy/clientbind"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun/netstack"
@@ -59,6 +60,28 @@ func CreateIPCRequest(conf *DeviceConfig) (*DeviceSetting, error) {
 	return setting, nil
 }
 
+// bindForConfig picks ClientOnlyBind for single-peer configs with a resolved
+// endpoint (suppresses the Windows Firewall listener prompt / silent inbound
+// block). Falls back to the default bind for multi-peer or endpointless configs.
+func bindForConfig(conf *DeviceConfig) conn.Bind {
+	if len(conf.Peers) != 1 {
+		return conn.NewDefaultBind()
+	}
+	ep := conf.Peers[0].Endpoint
+	if ep == nil {
+		return conn.NewDefaultBind()
+	}
+	ap, err := netip.ParseAddrPort(*ep)
+	if err != nil {
+		return conn.NewDefaultBind()
+	}
+	bind, err := clientbind.New(ap)
+	if err != nil {
+		return conn.NewDefaultBind()
+	}
+	return bind
+}
+
 // StartWireguard creates a tun interface on netstack given a configuration
 func StartWireguard(conf *Configuration, logLevel int) (*VirtualTun, error) {
 	deviceConf := conf.Device
@@ -71,7 +94,8 @@ func StartWireguard(conf *Configuration, logLevel int) (*VirtualTun, error) {
 	if err != nil {
 		return nil, err
 	}
-	dev := device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(logLevel, ""))
+	bind := bindForConfig(deviceConf)
+	dev := device.NewDevice(tun, bind, device.NewLogger(logLevel, ""))
 	err = dev.IpcSet(setting.IpcRequest)
 	if err != nil {
 		return nil, err
