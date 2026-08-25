@@ -1,3 +1,24 @@
+> [!IMPORTANT]
+> ### This is not upstream wireproxy
+>
+> This repository is [wireproxy](https://github.com/whyvl/wireproxy) carrying
+> a set of changes that let it run **inside an application** — spawned by, or
+> linked into, a mobile app — rather than only as a command-line tool. In
+> short:
+>
+> - the port forwarders return errors instead of calling `log.Fatal`, and can
+>   be stopped without exiting the process
+> - the device's log output can be delivered to the caller
+> - a config can be parsed from memory, not only from a file
+> - an inbound UDP tunnel (`[UDPServerTunnel]`) alongside the TCP one
+> - a connected-UDP bind for single-peer configs, and Android build targets
+>
+> **[What each change is for, and why → FORK.md](FORK.md)**
+>
+> Please report wireproxy bugs to
+> **[whyvl/wireproxy](https://github.com/whyvl/wireproxy)**, not here. Issues
+> here should be about the changes in `FORK.md` and nothing else.
+
 # wireproxy
 
 [![ISC licensed](https://img.shields.io/badge/license-ISC-blue)](./LICENSE)
