@@ -1,0 +1,83 @@
+# Android builds for Homerun's mobile host.
+#
+# Homerun ships this binary inside the APK and execs it; see FORK.md.
+name: Android
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+jobs:
+  arm64:
+    name: Android arm64 (ships)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: go.sum
+
+      # GOOS=android, not GOOS=linux. A linux/arm64 PIE binary builds happily
+      # and then will not start on a phone: Go stamps PT_INTERP as
+      # /lib/ld-linux-aarch64.so.1, a glibc path bionic does not have.
+      # GOOS=android emits /system/bin/linker64 and is PIE by default, which
+      # API 21+ requires in order to exec at all. arm64 needs no NDK.
+      - name: Build
+        run: make android-arm64
+
+      # Fail here rather than shipping something that dies on a device. The
+      # interpreter is the whole reason this job exists.
+      - name: Verify it is an Android binary
+        run: |
+          file dist/android/arm64-v8a/libwireproxy.so
+          readelf -l dist/android/arm64-v8a/libwireproxy.so \
+            | grep -q '/system/bin/linker64' \
+            || { echo "PT_INTERP is not Android's — this would not exec on a device"; exit 1; }
+
+      # Named lib*.so because Android's packager only extracts that pattern
+      # into nativeLibraryDir, which since API 29 is the only directory an app
+      # may exec from. It is an executable, not a library.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wireproxy_android_arm64-v8a
+          path: dist/android/arm64-v8a
+
+  x86_64:
+    name: Android x86_64 (emulator only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: go.sum
+
+      # android/amd64 is the one target Go says "requires external (cgo)
+      # linking", so this job needs an NDK where the arm64 one does not.
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27
+
+      - name: Build
+        run: |
+          make android-amd64 \
+            CC="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang"
+
+      - name: Verify it is an Android binary
+        run: |
+          file dist/android/x86_64/libwireproxy.so
+          readelf -l dist/android/x86_64/libwireproxy.so \
+            | grep -q '/system/bin/linker64' \
+            || { echo "PT_INTERP is not Android's — this would not exec on a device"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wireproxy_android_x86_64
+          path: dist/android/x86_64
