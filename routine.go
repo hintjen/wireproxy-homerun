@@ -213,6 +213,46 @@ func (d VirtualTun) resolveToAddrPort(endpoint *addressPort) (*netip.AddrPort, e
 	return &addrPort, nil
 }
 
+// passthroughResolver is a socks5 NameResolver that performs no resolution: it
+// leaves the FQDN untouched (returns a nil IP) so the FQDN survives to the dial
+// callback, where the domain-based routing decision is made. Resolution then
+// happens on the chosen network — the tunnel netstack for tunnelled hosts, the
+// system resolver for direct hosts.
+type passthroughResolver struct{}
+
+func (passthroughResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
+	return ctx, nil, nil
+}
+
+// RoutedDial returns a dialer that sends whitelisted hosts through the tunnel
+// and dials everything else directly. Used by the HTTP and SNI proxies, whose
+// dial callbacks receive the destination hostname intact.
+func (d VirtualTun) RoutedDial(router *DomainRouter) func(network, address string) (net.Conn, error) {
+	return func(network, address string) (net.Conn, error) {
+		if router.route(hostFromAddr(address)) {
+			return d.Tnet.Dial(network, address)
+		}
+		return net.Dial(network, address)
+	}
+}
+
+// routedSocks5Dial returns a socks5 dial-with-request callback that routes based
+// on the original destination FQDN (preserved on request.DestAddr), falling back
+// to the address host for IP-literal targets.
+func (d VirtualTun) routedSocks5Dial(router *DomainRouter) func(context.Context, string, string, *socks5.Request) (net.Conn, error) {
+	return func(ctx context.Context, network, address string, request *socks5.Request) (net.Conn, error) {
+		host := request.DestAddr.FQDN
+		if host == "" {
+			host = hostFromAddr(address)
+		}
+		if router.route(host) {
+			return d.Tnet.DialContext(ctx, network, address)
+		}
+		var dialer net.Dialer
+		return dialer.DialContext(ctx, network, address)
+	}
+}
+
 // Bind acquires the socks5 listener.
 func (config *Socks5Config) Bind(_ *VirtualTun) error {
 	listener, err := net.Listen("tcp", config.BindAddress)
@@ -239,10 +279,23 @@ func (config *Socks5Config) Serve(vt *VirtualTun) error {
 	}
 
 	options := []socks5.Option{
-		socks5.WithDial(vt.Tnet.DialContext),
-		socks5.WithResolver(vt),
 		socks5.WithAuthMethods(authMethods),
 		socks5.WithBufferPool(bufferpool.NewPool(256 * 1024)),
+	}
+
+	if len(config.TunnelDomains) == 0 && !config.LogDomains {
+		// Legacy path: everything through the tunnel, resolved via tunnel DNS.
+		options = append(options,
+			socks5.WithDial(vt.Tnet.DialContext),
+			socks5.WithResolver(vt),
+		)
+	} else {
+		// Split-routing path: keep the FQDN so we can decide per connection.
+		router := NewDomainRouter(config.TunnelDomains, config.LogDomains)
+		options = append(options,
+			socks5.WithDialAndRequest(vt.routedSocks5Dial(router)),
+			socks5.WithResolver(passthroughResolver{}),
+		)
 	}
 
 	if err := socks5.NewServer(options...).Serve(config.listener); err != nil && !config.closedByUs(err) {
@@ -290,9 +343,10 @@ func (config *HTTPConfig) Serve(vt *VirtualTun) error {
 		return errors.New("http proxy: Serve called before Bind")
 	}
 
+	router := NewDomainRouter(config.TunnelDomains, config.LogDomains)
 	server := &HTTPServer{
 		config: config,
-		dial:   vt.Tnet.Dial,
+		dial:   vt.RoutedDial(router),
 		auth:   CredentialValidator{config.Username, config.Password},
 	}
 	if config.Username != "" || config.Password != "" {
@@ -493,6 +547,43 @@ func (conf *TCPServerTunnelConfig) Serve(vt *VirtualTun) error {
 func (conf *TCPServerTunnelConfig) Close() error {
 	conf.markClosed()
 	return closeListener(conf.listener)
+}
+
+// Bind acquires the SNI proxy listener.
+func (config *SNIConfig) Bind(_ *VirtualTun) error {
+	listener, err := net.Listen("tcp", config.BindAddress)
+	if err != nil {
+		return fmt.Errorf("sni proxy: cannot listen on %s: %w", config.BindAddress, err)
+	}
+	config.listener = listener
+	return nil
+}
+
+// Serve accepts connections, reads the SNI from each ClientHello, and forwards
+// to that host — through the tunnel or directly, per the domain router.
+func (config *SNIConfig) Serve(vt *VirtualTun) error {
+	if config.listener == nil {
+		return errors.New("sni proxy: Serve called before Bind")
+	}
+
+	router := NewDomainRouter(config.TunnelDomains, config.LogDomains)
+	dial := vt.RoutedDial(router)
+
+	for {
+		conn, err := config.listener.Accept()
+		if err != nil {
+			if config.closedByUs(err) {
+				return nil
+			}
+			return fmt.Errorf("sni proxy: %w", err)
+		}
+		go sniServe(dial, conn)
+	}
+}
+
+func (config *SNIConfig) Close() error {
+	config.markClosed()
+	return closeListener(config.listener)
 }
 
 // closeListener closes c if it exists, tolerating a second close.

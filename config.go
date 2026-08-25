@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/go-ini/ini"
@@ -82,20 +84,33 @@ type UDPServerTunnelConfig struct {
 }
 
 type Socks5Config struct {
-	BindAddress string
-	Username    string
-	Password    string
+	BindAddress   string
+	Username      string
+	Password      string
+	TunnelDomains []*regexp.Regexp
+	LogDomains    bool
+
+	listener net.Listener
+	shutdown
+}
+
+type SNIConfig struct {
+	BindAddress   string
+	TunnelDomains []*regexp.Regexp
+	LogDomains    bool
 
 	listener net.Listener
 	shutdown
 }
 
 type HTTPConfig struct {
-	BindAddress string
-	Username    string
-	Password    string
-	CertFile    string
-	KeyFile     string
+	BindAddress   string
+	Username      string
+	Password      string
+	CertFile      string
+	KeyFile       string
+	TunnelDomains []*regexp.Regexp
+	LogDomains    bool
 
 	listener net.Listener
 	shutdown
@@ -448,6 +463,41 @@ func parseTCPServerTunnelConfig(section *ini.Section) (RoutineSpawner, error) {
 	return config, nil
 }
 
+// parseRegexList reads a whitelist of regular expressions from a section key.
+// Each occurrence of the key (one per line; AllowShadows is enabled) is treated
+// as a single, complete regex — the value is NOT split on commas, so quantifiers
+// like `a{2,4}` work. An absent key yields no patterns. An invalid pattern is a
+// configuration error, so --configtest rejects it before any traffic flows.
+func parseRegexList(section *ini.Section, keyName string) ([]*regexp.Regexp, error) {
+	key, err := section.GetKey(keyName)
+	if err != nil {
+		return nil, nil
+	}
+
+	var patterns []*regexp.Regexp
+	for _, raw := range key.ValueWithShadows() {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		re, cerr := regexp.Compile(raw)
+		if cerr != nil {
+			return nil, errors.New("invalid " + keyName + " regex `" + raw + "`: " + cerr.Error())
+		}
+		patterns = append(patterns, re)
+	}
+	return patterns, nil
+}
+
+// parseBoolKey reads an optional boolean key, defaulting to false when absent.
+func parseBoolKey(section *ini.Section, keyName string) (bool, error) {
+	key, err := section.GetKey(keyName)
+	if err != nil {
+		return false, nil
+	}
+	return key.Bool()
+}
+
 func parseSocks5Config(section *ini.Section) (RoutineSpawner, error) {
 	config := &Socks5Config{}
 
@@ -462,6 +512,42 @@ func parseSocks5Config(section *ini.Section) (RoutineSpawner, error) {
 
 	password, _ := parseString(section, "Password")
 	config.Password = password
+
+	tunnelDomains, err := parseRegexList(section, "TunnelDomains")
+	if err != nil {
+		return nil, err
+	}
+	config.TunnelDomains = tunnelDomains
+
+	logDomains, err := parseBoolKey(section, "LogDomains")
+	if err != nil {
+		return nil, err
+	}
+	config.LogDomains = logDomains
+
+	return config, nil
+}
+
+func parseSNIConfig(section *ini.Section) (RoutineSpawner, error) {
+	config := &SNIConfig{}
+
+	bindAddress, err := parseString(section, "BindAddress")
+	if err != nil {
+		return nil, err
+	}
+	config.BindAddress = bindAddress
+
+	tunnelDomains, err := parseRegexList(section, "TunnelDomains")
+	if err != nil {
+		return nil, err
+	}
+	config.TunnelDomains = tunnelDomains
+
+	logDomains, err := parseBoolKey(section, "LogDomains")
+	if err != nil {
+		return nil, err
+	}
+	config.LogDomains = logDomains
 
 	return config, nil
 }
@@ -486,6 +572,18 @@ func parseHTTPConfig(section *ini.Section) (RoutineSpawner, error) {
 
 	keyFile, _ := parseString(section, "KeyFile")
 	config.KeyFile = keyFile
+
+	tunnelDomains, err := parseRegexList(section, "TunnelDomains")
+	if err != nil {
+		return nil, err
+	}
+	config.TunnelDomains = tunnelDomains
+
+	logDomains, err := parseBoolKey(section, "LogDomains")
+	if err != nil {
+		return nil, err
+	}
+	config.LogDomains = logDomains
 
 	return config, nil
 }
@@ -575,7 +673,7 @@ func parseRoutinesConfig(routines *[]RoutineSpawner, cfg *ini.File, sectionName 
 
 // ParseConfig takes the path of a configuration file and parses it into Configuration
 func ParseConfig(path string) (*Configuration, error) {
-	return parseConfigSource(path)
+	return parseConfigSource(path, filepath.Dir(path))
 }
 
 // ParseConfigString parses a configuration held in memory.
@@ -592,11 +690,15 @@ func ParseConfigString(text string) (*Configuration, error) {
 		return nil, errors.New("configuration is empty")
 	}
 	// go-ini's LoadSources takes []byte as raw content rather than a filename.
-	return parseConfigSource([]byte(text))
+	return parseConfigSource([]byte(text), "")
 }
 
 // parseConfigSource parses anything go-ini accepts: a path, or raw bytes.
-func parseConfigSource(source any) (*Configuration, error) {
+//
+// baseDir is where a bare WGConfig filename is resolved from -- the parent
+// config file's directory when there is one. A config parsed from memory has
+// no directory, so an empty baseDir leaves the name for the OS to resolve.
+func parseConfigSource(source any, baseDir string) (*Configuration, error) {
 	iniOpt := ini.LoadOptions{
 		Insensitive:            true,
 		AllowShadows:           true,
@@ -620,7 +722,14 @@ func parseConfigSource(source any) (*Configuration, error) {
 	wgConf, err := root.GetKey("WGConfig")
 	wgCfg := cfg
 	if err == nil {
-		wgCfg, err = ini.LoadSources(iniOpt, wgConf.String())
+		wgPath := wgConf.String()
+		// A bare filename (no path separators) is resolved relative to the
+		// directory of the parent config file, so the wg config can sit
+		// alongside the wireproxy config without needing a full path.
+		if baseDir != "" && filepath.Base(wgPath) == wgPath {
+			wgPath = filepath.Join(baseDir, wgPath)
+		}
+		wgCfg, err = ini.LoadSources(iniOpt, wgPath)
 		if err != nil {
 			return nil, err
 		}
@@ -659,6 +768,11 @@ func parseConfigSource(source any) (*Configuration, error) {
 	}
 
 	err = parseRoutinesConfig(&routinesSpawners, cfg, "http", parseHTTPConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	err = parseRoutinesConfig(&routinesSpawners, cfg, "SNI", parseSNIConfig)
 	if err != nil {
 		return nil, err
 	}
