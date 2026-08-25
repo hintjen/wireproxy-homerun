@@ -495,7 +495,7 @@ func parseResolveConfig(section *ini.Section) (*ResolveConfig, error) {
 
 	resolvStrategy, _ := parseString(section, "ResolveStrategy")
 	config.ResolveStrategy = resolvStrategy
-  
+
 	return config, nil
 }
 
@@ -667,9 +667,9 @@ func parseConfigSource(source any) (*Configuration, error) {
 		resolve, err = parseResolveConfig(resolveSection)
 		if err != nil {
 			return nil, err
-	  }
-  }
-    
+		}
+	}
+
 	err = parseRoutinesConfig(&routinesSpawners, cfg, "UDPServerTunnel", parseUDPServerTunnelConfig)
 	if err != nil {
 		return nil, err
