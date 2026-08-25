@@ -109,15 +109,16 @@ func TestServeBeforeBindIsAnError(t *testing.T) {
 	}
 }
 
-// The same contract for the socks5 and HTTP routines, which bind ordinary
+// The same contract for the socks5, HTTP and SNI routines, which bind ordinary
 // local listeners and used to exit on exactly the same paths.
-func TestSocks5AndHTTPStopCleanly(t *testing.T) {
+func TestProxiesStopCleanly(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		spawner RoutineSpawner
 	}{
 		{"socks5", &Socks5Config{BindAddress: "127.0.0.1:0"}},
 		{"http", &HTTPConfig{BindAddress: "127.0.0.1:0"}},
+		{"sni", &SNIConfig{BindAddress: "127.0.0.1:0"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.spawner.Bind(nil); err != nil {
