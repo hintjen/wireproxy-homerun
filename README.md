@@ -21,8 +21,8 @@
 
 # wireproxy, for Homerun Desktop and Homerun Go
 
-[Homerun](https://gethomerun.app) hosts Minecraft servers on the player's own
-hardware — a PC with Homerun Desktop, a phone with Homerun Go — and this fork
+[Homerun Desktop and Homerun Go](https://gethomerun.app) host Minecraft servers
+on the player's own hardware — a PC, or a phone — and this fork
 is how those servers are reached from the internet: a WireGuard tunnel to the
 Homerun gateway, running inside the app.
 
