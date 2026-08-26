@@ -13,9 +13,11 @@ owns stderr, and when anything goes wrong it calls `log.Fatal`, which is
 
 [Homerun](https://gethomerun.app) runs it **inside an application** — spawned
 by Homerun Desktop and by Homerun Go on Android, and on iOS linked into
-Homerun Go as a library, because iOS cannot spawn a process at all — to make a phone-hosted Minecraft server reachable through the
-Homerun gateway. A phone on cellular sits behind CGNAT; there is no
-port-forwarding alternative. In that setting:
+Homerun Go as a library, because iOS cannot spawn a process at all — to
+make a Minecraft server on the player's own PC or phone reachable through
+the Homerun gateway. A phone on cellular sits behind CGNAT and a home PC
+behind NAT; port forwarding is not an option offered to a player. In that
+setting:
 
 - **`os.Exit` is the application dying.** Closing a listener is how a tunnel
   is stopped, and in upstream the accept loop answered that with
