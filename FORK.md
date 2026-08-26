@@ -11,9 +11,9 @@ wireproxy was written to be a **command-line tool**: it runs until killed,
 owns stderr, and when anything goes wrong it calls `log.Fatal`, which is
 `os.Exit(1)`.
 
-Homerun runs it **inside an application** — spawned by the Android host, and
-on iOS linked into the app as a library, because iOS cannot spawn a process
-at all — to make a phone-hosted Minecraft server reachable through the
+[Homerun](https://gethomerun.app) runs it **inside an application** — spawned
+by Homerun Desktop and by Homerun Go on Android, and on iOS linked into
+Homerun Go as a library, because iOS cannot spawn a process at all — to make a phone-hosted Minecraft server reachable through the
 Homerun gateway. A phone on cellular sits behind CGNAT; there is no
 port-forwarding alternative. In that setting:
 

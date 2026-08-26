@@ -2,9 +2,9 @@
 > ### This is not upstream wireproxy
 >
 > This repository is [wireproxy](https://github.com/whyvl/wireproxy) carrying
-> a set of changes that let it run **inside an application** — spawned by, or
-> linked into, a mobile app — rather than only as a command-line tool. In
-> short:
+> a set of changes that let it run **inside an application** — spawned by
+> Homerun Desktop and by Homerun Go on Android, linked into Homerun Go on
+> iOS — rather than only as a command-line tool. In short:
 >
 > - the port forwarders return errors instead of calling `log.Fatal`, and can
 >   be stopped without exiting the process
@@ -19,7 +19,12 @@
 > **[whyvl/wireproxy](https://github.com/whyvl/wireproxy)**, not here. Issues
 > here should be about the changes in `FORK.md` and nothing else.
 
-# wireproxy, for Homerun
+# wireproxy, for Homerun Desktop and Homerun Go
+
+[Homerun](https://gethomerun.app) hosts Minecraft servers on the player's own
+hardware — a PC with Homerun Desktop, a phone with Homerun Go — and this fork
+is how those servers are reached from the internet: a WireGuard tunnel to the
+Homerun gateway, running inside the app.
 
 Everything about wireproxy itself — what it is, the config format, the
 proxies and tunnels it offers, installing and running it, its maintainers and
@@ -35,7 +40,7 @@ What this repository changes, and why each change exists:
 ```sh
 go build ./cmd/wireproxy
 go test ./...
-make android-arm64      # the binary Homerun ships on Android; see FORK.md
+make android-arm64      # the binary Homerun Go ships on Android; see FORK.md
 ```
 
 ## Licence
