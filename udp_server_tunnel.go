@@ -148,7 +148,7 @@ func (conf *UDPServerTunnelConfig) Serve(_ *VirtualTun) error {
 			// Forward responses from local target back to WireGuard peer.
 			go func(srcAddr *net.UDPAddr, sess *udpServerSession) {
 				defer closeSession(srcAddr.String(), sess)
-				defer sess.localConn.Close()
+				defer func() { _ = sess.localConn.Close() }()
 
 				rbuf := make([]byte, 64*1024)
 				for {
