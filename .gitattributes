@@ -1,0 +1,6 @@
+# Our README replaces upstream's (it links there instead of copying it),
+# so upstream's edits to it are never wanted: resolve every merge of README.md
+# to our side. Needs `git config merge.ours.driver true` in the checkout doing
+# the merge; without it git falls back to a normal merge and conflicts, which
+# is the safe direction.
+README.md merge=ours
