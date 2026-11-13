@@ -122,6 +122,10 @@ func StartWireguardWithLogger(conf *Configuration, logger *device.Logger) (*Virt
 	if err != nil {
 		return nil, err
 	}
+	// Before anything listens or dials: see tcp_recovery.go.
+	if err := disableRACK(tnet); err != nil {
+		return nil, err
+	}
 	bind := bindForConfig(deviceConf)
 	dev := device.NewDevice(tun, bind, logger)
 	err = dev.IpcSet(setting.IpcRequest)
