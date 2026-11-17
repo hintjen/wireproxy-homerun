@@ -138,6 +138,16 @@ func StartWireguardWithLogger(conf *Configuration, logger *device.Logger) (*Virt
 		return nil, err
 	}
 
+	// A connected socket does not follow the host to a new network: see roam.go.
+	if cb, ok := bind.(*clientbind.ClientOnlyBind); ok {
+		var peer *device.Peer
+		var key device.NoisePublicKey
+		if err := key.FromHex(deviceConf.Peers[0].PublicKey); err == nil {
+			peer = dev.LookupPeer(key)
+		}
+		go followRoute(dev, cb, peer, logger)
+	}
+
 	hasV4 := false
 	hasV6 := false
 	for _, addr := range setting.DeviceAddr {
