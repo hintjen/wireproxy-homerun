@@ -21,7 +21,7 @@ func roamingDevice(t *testing.T) (*device.Device, *clientbind.ClientOnlyBind, *d
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { gateway.Close() })
+	t.Cleanup(func() { _ = gateway.Close() })
 
 	conf, err := ParseConfigString(fmt.Sprintf(`[Interface]
 PrivateKey = OMhFP0Xt3AKk7oNXFVpXsPqFPRhKa5PHSCiKX2h2XHo=

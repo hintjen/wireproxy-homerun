@@ -14,7 +14,7 @@ func peer(t *testing.T) netip.AddrPort {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { l.Close() })
+	t.Cleanup(func() { _ = l.Close() })
 	return l.LocalAddr().(*net.UDPAddr).AddrPort()
 }
 
@@ -27,7 +27,7 @@ func opened(t *testing.T) *ClientOnlyBind {
 	if _, _, err := b.Open(0); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { b.Close() })
+	t.Cleanup(func() { _ = b.Close() })
 	return b
 }
 

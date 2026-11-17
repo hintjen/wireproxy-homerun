@@ -69,7 +69,7 @@ func routeTo(network string, peer netip.AddrPort) (netip.Addr, error) {
 	if err != nil {
 		return netip.Addr{}, err
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	return c.LocalAddr().(*net.UDPAddr).AddrPort().Addr().Unmap(), nil
 }
 
